@@ -1,0 +1,10 @@
+# Ignore certificates and keys
+*.crt
+*.key
+*.pem
+
+# Ignore environment files
+.env
+
+# Ignore local SQLite/Grafana databases if you copied them
+*.db
