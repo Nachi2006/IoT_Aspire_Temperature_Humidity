@@ -1,0 +1,170 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+#include <time.h>
+
+#define DHTPIN D4
+#define DHTTYPE DHT22
+
+const char* ssid = "WIFI_NAME";
+const char* password = "WIFI_PWD";
+
+const char* mqtt_server = "AWS_PUBLIC_IP";
+const int mqtt_port = 8883;
+const char* mqtt_user = "node_user_name";
+const char* mqtt_pass = "node_password";
+
+const char root_ca[] PROGMEM =
+"-----BEGIN CERTIFICATE-----\n"
+"Server Public Certificate"
+"-----END CERTIFICATE-----\n";
+
+
+BearSSL::X509List cert(root_ca);
+BearSSL::WiFiClientSecure espClient;
+PubSubClient client(espClient);
+DHT dht(DHTPIN, DHTTYPE);
+
+unsigned long lastPublish = 0;
+
+void connectWiFi() {
+  Serial.print("Connecting WiFi");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi connected");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void syncTime() {
+  configTime(0, 0,
+             "pool.ntp.org",
+             "time.nist.gov");
+
+  Serial.print("Syncing time");
+
+  time_t now = time(nullptr);
+
+  while (now < 1700000000) {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+  }
+
+  Serial.println();
+  Serial.println("Time synced");
+}
+
+bool connectMQTT() {
+  if (client.connected()) {
+    return true;
+  }
+
+  Serial.print("Connecting MQTT...");
+
+  String clientId = "ESP8266-";
+  clientId += ESP.getChipId();
+
+  bool connected = client.connect(
+      clientId.c_str(),
+      mqtt_user,
+      mqtt_pass
+  );
+
+  if (connected) {
+    Serial.println("connected");
+  } else {
+    Serial.print("failed rc=");
+    Serial.println(client.state());
+    
+    char err_buf[256];
+    espClient.getLastSSLError(err_buf, sizeof(err_buf));
+    Serial.print("SSL Error: ");
+    Serial.println(err_buf);
+  }
+
+  return connected;
+}
+
+void publishTelemetry() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("DHT read failed");
+    return;
+  }
+
+  char payload[96];
+
+  snprintf(
+      payload,
+      sizeof(payload),
+      "{\"temperature\":%.2f,\"humidity\":%.2f}",
+      temperature,
+      humidity
+  );
+
+  bool success =
+      client.publish(
+          "telemetry/device_no",
+          payload,
+          false
+      );
+
+  Serial.print("Publish: ");
+  Serial.println(success ? "OK" : "FAILED");
+
+  Serial.println(payload);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  dht.begin();
+  delay(2000);
+
+  connectWiFi();
+  syncTime();
+
+  espClient.setTrustAnchors(&cert);
+
+  client.setServer(
+      mqtt_server,
+      mqtt_port
+  );
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  if (!client.connected()) {
+    static unsigned long lastRetry = 0;
+
+    if (millis() - lastRetry > 5000) {
+      lastRetry = millis();
+      connectMQTT();
+    }
+
+    return;
+  }
+
+  client.loop();
+
+  if (millis() - lastPublish > 10000) {
+    lastPublish = millis();
+    publishTelemetry();
+  }
+}
